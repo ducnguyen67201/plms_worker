@@ -3,11 +3,11 @@ package main
 import (
 	"code_evaluator_worker/AppConfig"
 	"code_evaluator_worker/Model"
+	"code_evaluator_worker/Utils"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"os/exec"
 	"time"
 )
@@ -68,21 +68,21 @@ func main() {
 
 
 func processJob(job Model.CodeJob) {
-	filename := fmt.Sprintf("/tmp/%s.py", job.JobID)
-	if err := os.WriteFile(filename, []byte(job.SourceCode), 0644); err != nil {
-		log.Printf("Failed to write file for job %s: %v\n", job.JobID, err)
-		return
-	}
+	filename := fmt.Sprintf("./tmp/job_%s.py", job.JobID)
+
+	Utils.SaveFile(filename, job.SourceCode)
+	
 	defer exec.Command("rm", "-f", filename).Run()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "python3", filename)
+	// execute the Python script 
+	cmd := exec.CommandContext(ctx, "python", filename)
 	out, err := cmd.CombinedOutput()
 
 	if ctx.Err() == context.DeadlineExceeded {
-		log.Printf("Job %s timed out\n", job.JobID)
+		log.Printf("job %s timed out\n", job.JobID)
 		// Save timeout error to DB/Redis
 		return
 	}
@@ -93,5 +93,8 @@ func processJob(job Model.CodeJob) {
 
 	log.Printf("✅ Job %s output:\n%s\n", job.JobID, string(out))
 
+
+	// Utils.RemoveFile(filename)
 	// Save result to Redis/DB (not shown here)
 }
+
