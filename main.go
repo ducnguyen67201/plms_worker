@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"strings"
 	"time"
 
 	_ "github.com/alexbrainman/odbc"
@@ -111,10 +112,34 @@ func processJob(db *sql.DB,job Model.CodeJob) {
 	}
 	fmt.Println("problemWithTestCase: ", problemWithTestCase)
 
-	// execute the Python script 
-	cmd := exec.CommandContext(ctx, "python", filename)
-	out, err := cmd.CombinedOutput()
+	// * Looping thorugh each test case , taking in input and passed it to the program 
+	// Then compare the output with expected output 
+	for _, testCase := range problemWithTestCase.TestCase { 
+		fmt.Println("\n\n ========================= Processing Test Case "+ fmt.Sprint(testCase.TestCaseID) + " =========================")
+		fmt.Println("testCase: ", testCase.Input)
+		fmt.Println("testCase output : ", testCase.ExpectedOutput)
+	
+		cmd := exec.CommandContext(ctx, "python", filename)
+		cmd.Stdin = strings.NewReader(testCase.Input)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			log.Printf("Job %s failed: %v\n", job.JobID, err)
+			continue
+		}
 
+		output := strings.TrimSpace(string(out))
+		expected := strings.TrimSpace(testCase.ExpectedOutput)
+		fmt.Println("output after passing input: ", output)
+		// ? Compare the output from program with expected output
+		if output == expected {
+			log.Printf("Test case %d passed\n", testCase.TestCaseID)
+		} else {
+			log.Printf("Test case %d failed: expected %s, got %s\n", testCase.TestCaseID, expected, output)
+			// Save failed test case to DB/Redis (not shown here)
+		}
+	}
+
+	// * Check if the job timed out or failed
 	if ctx.Err() == context.DeadlineExceeded {
 		log.Printf("job %s timed out\n", job.JobID)
 		// Save timeout error to DB/Redis
@@ -125,10 +150,8 @@ func processJob(db *sql.DB,job Model.CodeJob) {
 		log.Printf("Job %s failed: %v\n", job.JobID, err)
 	}
 
-	log.Printf("✅ Job %s output:\n%s\n", job.JobID, string(out))
-
-
 	Utils.RemoveFile(filename)
 	// Save result to Redis/DB (not shown here)
+
 }
 
