@@ -5,14 +5,39 @@ import (
 	"code_evaluator_worker/Model"
 	"code_evaluator_worker/Utils"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os/exec"
 	"time"
+
+	_ "github.com/alexbrainman/odbc"
 )
 
+
 func main() {
+	// * Connect to MongoDB
+	redis,err  := AppConfig.ConnectRedis()
+	if err != nil { 
+		log.Fatal("Failed to connect to Redis:", err)
+	}
+	defer redis.Close()
+
+	// * Connect to OracleBD
+	connStr := "Driver={Oracle in OraDB21Home1};Dbq=localhost:1521/xe;Uid=damg7275_final;Pwd=damg7275_final;"
+	db, err := sql.Open("odbc", connStr)
+
+	if err != nil {
+		panic(err)
+	}
+
+	err = db.Ping()
+	if err != nil {
+		log.Fatal("db.Ping failed:", err)
+	}
+
+	// * Connect to RabbitMQ
 	mqClient, err := AppConfig.InitRabbitMQ("amqp://admin:admin@localhost:5672/")
 	if err != nil {
 		log.Fatal("Failed to connect to RabbitMQ:", err)
@@ -57,8 +82,8 @@ func main() {
 				log.Printf("Error unmarshalling message: %s", err)
 				continue
 			}
-			log.Printf("Job ID: %d, Language: %s, Source Code: %s", job.JobID, job.Language, job.SourceCode)
-			processJob(job)
+			log.Printf("processing ..... Job ID: %s", job.JobID)
+			processJob(db, job)
 		}
 	}()
 
@@ -67,15 +92,24 @@ func main() {
 }
 
 
-func processJob(job Model.CodeJob) {
+func processJob(db *sql.DB,job Model.CodeJob) {
 	filename := fmt.Sprintf("./tmp/job_%s.py", job.JobID)
 
-	Utils.SaveFile(filename, job.SourceCode)
+	Utils.SaveFile(filename, job.Submission.Code)
 	
 	defer exec.Command("rm", "-f", filename).Run()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+
+
+	// ? Get test case for problem from problem_id
+	problemWithTestCase, err := GetTestCase(db, job.Submission.ProblemID)
+	if err != nil {
+		log.Printf("Error getting test case: %s", err)
+		return
+	}
+	fmt.Println("problemWithTestCase: ", problemWithTestCase)
 
 	// execute the Python script 
 	cmd := exec.CommandContext(ctx, "python", filename)
@@ -94,7 +128,7 @@ func processJob(job Model.CodeJob) {
 	log.Printf("✅ Job %s output:\n%s\n", job.JobID, string(out))
 
 
-	// Utils.RemoveFile(filename)
+	Utils.RemoveFile(filename)
 	// Save result to Redis/DB (not shown here)
 }
 
