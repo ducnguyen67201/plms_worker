@@ -23,10 +23,10 @@ func ProcessJob(jobID string, submissionID string, userCode string, methodName s
 	}
 
 	// Remove the temporary file after execution
-	err = RemoveFile(filePath)
-	if err != nil {
-		return "", err
-	}
+	// err = RemoveFile(filePath)
+	// if err != nil {
+	// 	return "", err
+	// }
 
 	return output, nil
 }
