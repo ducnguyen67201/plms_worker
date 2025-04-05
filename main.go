@@ -4,14 +4,11 @@ import (
 	"code_evaluator_worker/AppConfig"
 	"code_evaluator_worker/Model"
 	"code_evaluator_worker/Utils"
-	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
-	"os/exec"
 	"strings"
-	"time"
 
 	_ "github.com/alexbrainman/odbc"
 )
@@ -93,65 +90,77 @@ func main() {
 }
 
 
-func processJob(db *sql.DB,job Model.CodeJob) {
-	filename := fmt.Sprintf("./tmp/job_%s.py", job.JobID)
-
-	Utils.SaveFile(filename, job.Submission.Code)
-	
-	defer exec.Command("rm", "-f", filename).Run()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-
-	// ? Get test case for problem from problem_id
+func processJob(db *sql.DB, job Model.CodeJob) {
+	// ? Get test cases for the problem
 	problemWithTestCase, err := GetTestCase(db, job.Submission.ProblemID)
 	if err != nil {
-		log.Printf("Error getting test case: %s", err)
+		log.Printf("❌ Error getting test case: %s", err)
 		return
 	}
-	fmt.Println("problemWithTestCase: ", problemWithTestCase)
 
-	// * Looping thorugh each test case , taking in input and passed it to the program 
-	// Then compare the output with expected output 
-	for _, testCase := range problemWithTestCase.TestCase { 
-		fmt.Println("\n\n ========================= Processing Test Case "+ fmt.Sprint(testCase.TestCaseID) + " =========================")
-		fmt.Println("testCase: ", testCase.Input)
-		fmt.Println("testCase output : ", testCase.ExpectedOutput)
-	
-		cmd := exec.CommandContext(ctx, "python", filename)
-		cmd.Stdin = strings.NewReader(testCase.Input)
-		out, err := cmd.CombinedOutput()
+	// Extract method name and parameter names
+	// methodName := job.ProblemMeta.MethodName
+	// paramNames := job.ProblemMeta.ParameterNames
+	methodName := "add"
+	paramNames, err := Utils.ExtractPythonMethod(job.Submission.Code)
+	if err != nil {
+		log.Printf("❌ Error extracting method name and parameter names: %s", err)
+		return
+	}
+
+	paramNamesList := paramNames.ParamName
+	if len(paramNamesList) == 0 {
+		log.Printf("❌ No parameter names found")
+	}
+
+	// 🔁 Loop through each test case
+	for _, testCase := range problemWithTestCase.TestCase {
+		fmt.Println("\n\n========================= Processing Test Case", testCase.TestCaseID, "=========================")
+		fmt.Println("🔢 TestCase Input:", testCase.Input)
+		fmt.Println("🎯 Expected Output:", testCase.ExpectedOutput)
+
+		// * pre-process input values and parsed them into parameters slices of string 
+		var values []string
+		if strings.Contains(testCase.Input, ",") {
+			values = strings.Split(testCase.Input, ",")
+		} else {
+			values = strings.Fields(testCase.Input)
+		}
+
+		var parameter = make(map[string]interface{})
+		for val := range values { 
+			parameter[paramNamesList[val]] = values[val]
+		}
+
+		// Generate the complete driver script
+		driverCode := Utils.GenerateDriverScript(job.Submission.Code, methodName, parameter)
+
+		// Run the job with Utils.ProcessJob
+		output, err := Utils.ProcessJob(
+			job.JobID,
+			job.Submission.SubmissionID,
+			driverCode,
+			methodName,
+			paramNamesList,
+		)
 		if err != nil {
-			log.Printf("Job %s failed: %v\n", job.JobID, err)
+			log.Printf("❌ Job %s failed during execution: %v\n", job.JobID, err)
 			continue
 		}
 
-		output := strings.TrimSpace(string(out))
+		output = strings.TrimSpace(output)
 		expected := strings.TrimSpace(testCase.ExpectedOutput)
-		fmt.Println("output after passing input: ", output)
-		// ? Compare the output from program with expected output
-		if output == expected {
-			log.Printf("Test case %d passed\n", testCase.TestCaseID)
+
+		// Optional normalization
+		normalize := func(s string) string {
+			return strings.Join(strings.Fields(s), " ")
+		}
+
+		// Compare outputs
+		if normalize(output) == normalize(expected) {
+			log.Printf("✅ Test case %d passed\n", testCase.TestCaseID)
 		} else {
-			log.Printf("Test case %d failed: expected %s, got %s\n", testCase.TestCaseID, expected, output)
-			// Save failed test case to DB/Redis (not shown here)
+			log.Printf("❌ Test case %d failed\nExpected: %s\nGot: %s\n", testCase.TestCaseID, expected, output)
 		}
 	}
-
-	// * Check if the job timed out or failed
-	if ctx.Err() == context.DeadlineExceeded {
-		log.Printf("job %s timed out\n", job.JobID)
-		// Save timeout error to DB/Redis
-		return
-	}
-
-	if err != nil {
-		log.Printf("Job %s failed: %v\n", job.JobID, err)
-	}
-
-	Utils.RemoveFile(filename)
-	// Save result to Redis/DB (not shown here)
-
 }
-

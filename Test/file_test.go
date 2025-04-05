@@ -32,7 +32,7 @@ class Solution:
 	methodName := "add"
 	paramName := []string{"a", "b"}
 
-	driverScript := Utils.GenerateDriverScript(userCode, methodName, paramName)
+	driverScript := Utils.GenerateDriverScript(userCode, methodName, paramName, [nil])
 
 	result, err  := Utils.ProcessJob("5e29a09e-49ef-4a7e-ae72-ed2639512f44", "test_submission", driverScript, methodName, paramName)
 	if err != nil {
