@@ -4,15 +4,23 @@ import (
 	"code_evaluator_worker/AppConfig"
 	"code_evaluator_worker/Model"
 	"code_evaluator_worker/Utils"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
+	"reflect"
+	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	_ "github.com/alexbrainman/odbc"
+	"github.com/go-redis/redis/v8"
 )
 
+var Redis *redis.Client
+var ctx = context.Background()
 
 func main() {
 	// * Connect to MongoDB
@@ -20,6 +28,7 @@ func main() {
 	if err != nil { 
 		log.Fatal("Failed to connect to Redis:", err)
 	}
+	Redis = redis
 	defer redis.Close()
 
 	// * Connect to OracleBD
@@ -74,7 +83,7 @@ func main() {
 
 	go func() { 
 		for msg := range msgs {
-			log.Printf("Received a message: %s", msg.Body)
+			// log.Printf("Received a message: %s", msg.Body)
 			var job Model.CodeJob
 			if err := json.Unmarshal(msg.Body, &job); err != nil {
 				log.Printf("Error unmarshalling message: %s", err)
@@ -98,50 +107,36 @@ func processJob(db *sql.DB, job Model.CodeJob) {
 		return
 	}
 
-	// Extract method name and parameter names
-	// methodName := job.ProblemMeta.MethodName
-	// paramNames := job.ProblemMeta.ParameterNames
-	methodName := "add"
-	paramNames, err := Utils.ExtractPythonMethod(job.Submission.Code)
-	if err != nil {
-		log.Printf("❌ Error extracting method name and parameter names: %s", err)
-		return
-	}
-
-	paramNamesList := paramNames.ParamName
-	if len(paramNamesList) == 0 {
-		log.Printf("❌ No parameter names found")
-	}
-
 	// 🔁 Loop through each test case
 	for _, testCase := range problemWithTestCase.TestCase {
-		fmt.Println("\n\n========================= Processing Test Case", testCase.TestCaseID, "=========================")
-		fmt.Println("🔢 TestCase Input:", testCase.Input)
-		fmt.Println("🎯 Expected Output:", testCase.ExpectedOutput)
+		log.Printf("\n\n[%s] ========================= Processing Test Case %v =========================", time.Now().Format("2006-01-02 15:04:05"), testCase.TestCaseID)
+		log.Printf("🔢 TestCase Input: %s\n", testCase.Input)
+		log.Printf("🎯 Expected Output: %s\n", testCase.ExpectedOutput)
 
-		// * pre-process input values and parsed them into parameters slices of string 
-		var values []string
-		if strings.Contains(testCase.Input, ",") {
-			values = strings.Split(testCase.Input, ",")
-		} else {
-			values = strings.Fields(testCase.Input)
+		var data map[string]interface{}
+		err := json.Unmarshal([]byte(testCase.Input), &data)
+		if err != nil {
+			panic(err)
 		}
 
-		var parameter = make(map[string]interface{})
-		for val := range values { 
-			parameter[paramNamesList[val]] = values[val]
+		// convert input to string
+		args := data["args"]
+		argsBytes, err := json.Marshal(args)
+		if err != nil {
+			panic(err)
 		}
+		argsStr := string(argsBytes)
+		argsStr = argsStr[1 : len(argsStr)-1] // Remove the brackets
 
 		// Generate the complete driver script
-		driverCode := Utils.GenerateDriverScript(job.Submission.Code, methodName, parameter)
+		driverCode := Utils.GenerateDriverScript(job.Submission.Code, problemWithTestCase.MethodName, argsStr)
 
 		// Run the job with Utils.ProcessJob
 		output, err := Utils.ProcessJob(
 			job.JobID,
 			job.Submission.SubmissionID,
 			driverCode,
-			methodName,
-			paramNamesList,
+			strconv.FormatInt(testCase.TestCaseID, 10),
 		)
 		if err != nil {
 			log.Printf("❌ Job %s failed during execution: %v\n", job.JobID, err)
@@ -149,18 +144,89 @@ func processJob(db *sql.DB, job Model.CodeJob) {
 		}
 
 		output = strings.TrimSpace(output)
+		output = fmt.Sprintf("{\"value\":%s}", output)
 		expected := strings.TrimSpace(testCase.ExpectedOutput)
 
-		// Optional normalization
-		normalize := func(s string) string {
-			return strings.Join(strings.Fields(s), " ")
-		}
+		expectedNormalized, _ := NormalizeJSON(expected)
+		outputNormalized, _ := NormalizeJSON(output)
 
 		// Compare outputs
-		if normalize(output) == normalize(expected) {
+		if reflect.DeepEqual(expectedNormalized, outputNormalized) {
 			log.Printf("✅ Test case %d passed\n", testCase.TestCaseID)
 		} else {
 			log.Printf("❌ Test case %d failed\nExpected: %s\nGot: %s\n", testCase.TestCaseID, expected, output)
 		}
+
+		// * After finish processing the testcase, update status into redis
+		key := job.JobID
+		outputResponse := &Model.SubmitProblem{
+			SubmissionID:   job.Submission.SubmissionID,
+			UserID:         job.Submission.UserID,
+			ProblemID:      job.Submission.UserID,
+			SubmissionDate: time.Now(),
+			Result:         "success",
+			Performance:    "GREAT PERFORMANCE",
+			Code:           job.Submission.Code,
+			Language: 		job.Submission.Language,
+		}
+		UpateRedis(key, outputResponse)
 	}
+}
+
+func UpateRedis(key string, value *Model.SubmitProblem) { 
+	// Check if the key already exists
+	existingValue, err := Redis.Get(ctx, key).Result()
+	if err == redis.Nil {
+		log.Println("Key not found. Creating new entry.")
+	} else if err != nil {
+		log.Fatalf("Error checking Redis key: %v", err)
+	} else {
+		log.Printf("Key already exists. Value: %s — Overwriting...", existingValue)
+	}
+
+	// Marshal the struct into JSON
+	jsonData, err := json.Marshal(value)
+	if err != nil {
+		log.Fatalf("Failed to marshal struct: %v", err)
+	}
+
+	// Set JSON to Redis with no expiration (0 = permanent)
+	err = Redis.Set(ctx, key, jsonData, 0).Err()
+	if err != nil {
+		log.Fatalf("Failed to set value in Redis: %v", err)
+	}
+
+	log.Printf("Stored successfully under key: %s", key)
+}
+
+func SortMapByKey(input map[string]interface{}) map[string]interface{} {
+	// Extract and sort keys
+	keys := make([]string, 0, len(input))
+	for k := range input {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	// Create a new map and insert in sorted key order
+	sortedMap := make(map[string]interface{})
+	for _, k := range keys {
+		sortedMap[k] = input[k]
+	}
+	return sortedMap
+}
+
+func EncodePythonCode(raw string) string { 
+	raw = strings.ReplaceAll(raw, "\t", "\\t")
+	raw = strings.ReplaceAll(raw, "\n", "\\n")
+	return raw
+}
+
+func NormalizeJSON(s string) (interface{}, error) {
+	s = strings.ReplaceAll(s, "True", "true")
+	s = strings.ReplaceAll(s, "False", "false")
+	s = strings.ReplaceAll(s, "None", "null")
+
+	var result interface{}
+	err := json.Unmarshal([]byte(s), &result)
+	return result, err
 }

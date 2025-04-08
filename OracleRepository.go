@@ -24,6 +24,8 @@ func GetTestCase(db *sql.DB, problem_id int64) (*Model.ProblemWithTestCase, erro
 			difficultyLevel string
 			repeatedTimes   int64
 			problemType     string
+			methodName 		string
+			skeletonCode 	string
 
 			testCaseID 	int64
 			input 		string
@@ -41,6 +43,8 @@ func GetTestCase(db *sql.DB, problem_id int64) (*Model.ProblemWithTestCase, erro
 			&difficultyLevel,
 			&repeatedTimes,
 			&problemType,
+			&methodName,
+			&skeletonCode,
 
 			&testCaseID,
 			&input,
@@ -62,6 +66,8 @@ func GetTestCase(db *sql.DB, problem_id int64) (*Model.ProblemWithTestCase, erro
 				DifficultyLevel: difficultyLevel,
 				RepeatedTimes:   repeatedTimes,
 				Type:            problemType,
+				MethodName:      methodName,
+				SkeletonCode:    skeletonCode,
 				TestCase:       []Model.TestCase{},
 			}
 			firstRow = false
