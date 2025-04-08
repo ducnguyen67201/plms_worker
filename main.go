@@ -150,26 +150,38 @@ func processJob(db *sql.DB, job Model.CodeJob) {
 		expectedNormalized, _ := NormalizeJSON(expected)
 		outputNormalized, _ := NormalizeJSON(output)
 
+
+		key := job.JobID
+		var outputResponse Model.SubmitProblem
 		// Compare outputs
 		if reflect.DeepEqual(expectedNormalized, outputNormalized) {
 			log.Printf("✅ Test case %d passed\n", testCase.TestCaseID)
+			outputResponse = Model.SubmitProblem{
+				SubmissionID:   job.Submission.SubmissionID,
+				UserID:         job.Submission.UserID,
+				ProblemID:      job.Submission.UserID,
+				SubmissionDate: time.Now(),
+				Result:         "success",
+				Performance:    "GREAT PERFORMANCE",
+				Code:           job.Submission.Code,
+				Language: 		job.Submission.Language,
+			}
 		} else {
 			log.Printf("❌ Test case %d failed\nExpected: %s\nGot: %s\n", testCase.TestCaseID, expected, output)
+			outputResponse = Model.SubmitProblem{
+				SubmissionID:   job.Submission.SubmissionID,
+				UserID:         job.Submission.UserID,
+				ProblemID:      job.Submission.UserID,
+				SubmissionDate: time.Now(),
+				Result:         "failed",
+				Performance:    "GREAT PERFORMANCE",
+				Code:           job.Submission.Code,
+				Language: 		job.Submission.Language,
+			}
 		}
 
 		// * After finish processing the testcase, update status into redis
-		key := job.JobID
-		outputResponse := &Model.SubmitProblem{
-			SubmissionID:   job.Submission.SubmissionID,
-			UserID:         job.Submission.UserID,
-			ProblemID:      job.Submission.UserID,
-			SubmissionDate: time.Now(),
-			Result:         "success",
-			Performance:    "GREAT PERFORMANCE",
-			Code:           job.Submission.Code,
-			Language: 		job.Submission.Language,
-		}
-		UpateRedis(key, outputResponse)
+		UpateRedis(key, &outputResponse)
 	}
 }
 
