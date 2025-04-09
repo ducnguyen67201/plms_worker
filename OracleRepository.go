@@ -15,6 +15,7 @@ func GetTestCase(db *sql.DB, problem_id int64) (*Model.ProblemWithTestCase, erro
 	}
 	var problem *Model.ProblemWithTestCase
 	var firstRow bool = true 
+	defer rows.Close()
 	for rows.Next() { 
 		var ( 
 			problemID       int64

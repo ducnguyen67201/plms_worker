@@ -17,6 +17,7 @@ import (
 
 	_ "github.com/alexbrainman/odbc"
 	"github.com/go-redis/redis/v8"
+	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 var Redis *redis.Client
@@ -24,8 +25,8 @@ var ctx = context.Background()
 
 func main() {
 	// * Connect to MongoDB
-	redis,err  := AppConfig.ConnectRedis()
-	if err != nil { 
+	redis, err := AppConfig.ConnectRedis()
+	if err != nil {
 		log.Fatal("Failed to connect to Redis:", err)
 	}
 	Redis = redis
@@ -55,49 +56,62 @@ func main() {
 
 	q, err := mqClient.Channel.QueueDeclare(
 		"judge_problem", // queue name
-		true,        // durable
-		false,       // auto-delete
-		false,       // exclusive
-		false,       // no-wait
-		nil,         // arguments	
+		true,            // durable
+		false,           // auto-delete
+		false,           // exclusive
+		false,           // no-wait
+		nil,             // arguments
 	)
 	if err != nil {
 		log.Fatal("Failed to declare queue:", err)
 	}
 
+	err = mqClient.Channel.Qos(
+		30,   // prefetchCount: max messages this consumer will receive without ack
+		0,    // 0 menas no limit on the msg size 
+		false, 
+	)
+	if err != nil {
+		log.Fatal("Failed to set QoS:", err)
+	}
+
 	msgs, err := mqClient.Channel.Consume(
-		q.Name,
-		"",            // consumer tag
-		true,         // auto-ack
-		false,        // exclusive
-		false,        // no-local
-		false, 	  // no-wait
-		nil,          // arguments
+		q.Name, // queue name
+		"",     // consumer tag
+		false,  // auto-ack
+		false,  // exclusive
+		false,  // no-local
+		false,  // no-wait
+		nil,    // arguments (amqp091.Table)
 	)
 
 	if err != nil {
 		log.Fatal("Failed to register a consumer:", err)
 	}
 
-	log.Print("worker stared, waiting for messages...")
+	log.Print("worker started, waiting for messages...")
 
-	go func() { 
+	go func() {
 		for msg := range msgs {
-			// log.Printf("Received a message: %s", msg.Body)
-			var job Model.CodeJob
-			if err := json.Unmarshal(msg.Body, &job); err != nil {
-				log.Printf("Error unmarshalling message: %s", err)
-				continue
-			}
-			log.Printf("processing ..... Job ID: %s", job.JobID)
-			processJob(db, job)
+			go func(msg amqp.Delivery) { // Launch a goroutine for each message
+				var job Model.CodeJob
+				if err := json.Unmarshal(msg.Body, &job); err != nil {
+					log.Printf("Error unmarshalling message: %s", err)
+					msg.Nack(false, false) // Reject the message without requeue
+					return
+				}
+				log.Printf("processing ..... Job ID: %s", job.JobID)
+				processJob(db, job)
+
+				// Acknowledge the message only after processing is complete
+				msg.Ack(false)
+			}(msg) // Pass the message to the goroutine
 		}
 	}()
 
 	select {}
 
 }
-
 
 func processJob(db *sql.DB, job Model.CodeJob) {
 	// ? Get test cases for the problem
@@ -106,7 +120,7 @@ func processJob(db *sql.DB, job Model.CodeJob) {
 		log.Printf("❌ Error getting test case: %s", err)
 		return
 	}
-
+	fmt.Print("START PROCESSING TEST CASES")
 	// 🔁 Loop through each test case
 	for _, testCase := range problemWithTestCase.TestCase {
 		log.Printf("\n\n[%s] ========================= Processing Test Case %v =========================", time.Now().Format("2006-01-02 15:04:05"), testCase.TestCaseID)
@@ -150,7 +164,6 @@ func processJob(db *sql.DB, job Model.CodeJob) {
 		expectedNormalized, _ := NormalizeJSON(expected)
 		outputNormalized, _ := NormalizeJSON(output)
 
-
 		key := job.JobID
 		var outputResponse Model.SubmitProblem
 		// Compare outputs
@@ -164,7 +177,7 @@ func processJob(db *sql.DB, job Model.CodeJob) {
 				Result:         "success",
 				Performance:    "GREAT PERFORMANCE",
 				Code:           job.Submission.Code,
-				Language: 		job.Submission.Language,
+				Language:       job.Submission.Language,
 			}
 		} else {
 			log.Printf("❌ Test case %d failed\nExpected: %s\nGot: %s\n", testCase.TestCaseID, expected, output)
@@ -176,16 +189,16 @@ func processJob(db *sql.DB, job Model.CodeJob) {
 				Result:         "failed",
 				Performance:    "GREAT PERFORMANCE",
 				Code:           job.Submission.Code,
-				Language: 		job.Submission.Language,
+				Language:       job.Submission.Language,
 			}
 		}
-
 		// * After finish processing the testcase, update status into redis
 		UpateRedis(key, &outputResponse)
+		fmt.Print("FINSHED  PROCESSING TEST CASES")
 	}
 }
 
-func UpateRedis(key string, value *Model.SubmitProblem) { 
+func UpateRedis(key string, value *Model.SubmitProblem) {
 	// Check if the key already exists
 	existingValue, err := Redis.Get(ctx, key).Result()
 	if err == redis.Nil {
@@ -227,7 +240,7 @@ func SortMapByKey(input map[string]interface{}) map[string]interface{} {
 	return sortedMap
 }
 
-func EncodePythonCode(raw string) string { 
+func EncodePythonCode(raw string) string {
 	raw = strings.ReplaceAll(raw, "\t", "\\t")
 	raw = strings.ReplaceAll(raw, "\n", "\\n")
 	return raw
